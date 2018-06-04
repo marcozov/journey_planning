@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 from .planner import Status
 
-def rand_edges(std=1e-10, mean=-1):
+def rand_edges(std=1e-10, mean=1e-10):
     edges = pd.DataFrame(
         columns=[
             "dep_name", "arr_name", 
