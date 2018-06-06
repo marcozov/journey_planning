@@ -32,14 +32,16 @@ class Planner():
         - edges: DataFrame indicating all the edges (edges) between nodes.
         - reverse: boolean indicating wether the graph has to be explored in a direct of reversed mode, i.e. if the exploration starts from the departure node (False) or from the arrival node (True).
         """
-        self.all_edges = edges
+        self.all_edges = edges # they will be filtered every time the algorithm starts
         
-        self.nowalking_edges_backup = edges[edges.trip_id != "0000"] # they will be filtered every time the algorithm starts
+#         self.nowalking_edges_backup = edges[edges.trip_id != "0000"] # they will be filtered every time the algorithm starts
 #         self.edges = self.nowalking_edges_backup
-        
-        self.walking_edges_backup = edges[edges.trip_id == "0000"] # keep separately the walking edges
+#         self.walking_edges_backup = edges[edges.trip_id == "0000"] # keep separately the walking edges
         
         self.reverse = reverse
+        
+        self.init_edge_direction()
+#         self.sort_edges()
     
 #     def clear(self):
 #         """ Clear the structure so to restart the computation of the best path. """
@@ -48,15 +50,14 @@ class Planner():
 #         self.nowalking_edges_backup.prev_edge = np.NaN
     
     def compute_plan(self, departure_node, arrival_node, time, treshold):
-        """ Given the names of the departure and arrival nodes, a treshold and the time (which may refer either to the departure or arrival time depending on self.reverse), computes the edges above the treshold. """
+        """ Given the names of the departure and arrival nodes (e.g. I want to go from 'Zürich HB' to 'Stettbach'), a treshold (in [0, 1]) and the time (which may refer either to the departure or arrival time depending on self.reverse), the bets path (which take the lowest time) whose probability is above the give treshold. """
+        
+        # TODO could "arrival_node" be a time? so to indicate WHEN to stop instead of WHERE
+        
         assert treshold>=0 and treshold<=1, "treshold should be in [0, 1]"
         
 #         self.clear()
-        # filter the edges (for efficiency)
-        self.initialize_edges(time) # it takes ~40% of the original time with the filtering
-        
-#         print(self.edges.shape)
-        
+                
         # the nodes from which to start and end the algorithm depend on whether we have to perform the direct or reverse search
         if self.reverse:
             start_node = arrival_node 
@@ -70,10 +71,11 @@ class Planner():
 
         # ------------ Initialization ------------ 
         # visit the edges from the starting node
-        visited_ids = self.initialize_from(start_node, time)
+        visited_ids = self.init_edges(start_node, time)
+        
         # ------------ Main iteration -------------
         while True:
-            print(len(visited_ids))
+#             print(len(visited_ids))
 #             print(self.edges.shape)
 #             print(self.walking_edges.shape)
             if visited_ids.shape[0] == 0:
@@ -107,43 +109,79 @@ class Planner():
             path.reverse()
             
         return path
+
+    def init_edge_direction(self):
+        """ Initialize the direction of the edge. """
         
-    def initialize_from(self, node_name, time):
+        # set the direction of the edges depending on self.reverse (indicate from which solumn to which column they point)
+        if self.reverse:
+            self.from_node = "arr_node"  
+            self.to_node = "dep_node"
+            
+            self.from_time = "arr_time"
+            self.to_time = "dep_time"
+            
+            self.from_day = "arr_day"
+            self.to_day = "dep_day"
+        else:
+            self.from_node = "dep_node"  
+            self.to_node = "arr_node"
+            
+            self.from_time = "dep_time"
+            self.to_time = "arr_time"
+            
+            self.from_day = "dep_day"
+            self.to_day = "arr_day"
+        
+    def init_edges(self, node_name, time):
         """ 
-        Initializes the search given a starting node and time.
+        Initializes the search given a starting node and time, i.e. initializes the first edges to visit.
         Fetches for all edges <node_name> -> A (where A is a reachable node) and return the ones, within the groups of edges with the same trip_id, that starts the first and set them as Visited with probability 1. Repeat for every possible A.
         Note: the meaning of 'starts first' has different meaning depending on the value of self.reverse: 
             - self.reverse = False: search for the first departing edges after the 'time'
             - self.reverse = True : search for the first arriving edges before the 'time'
         return the ids of all the visited edges.
-        """
+        """            
+        
+        # set the direction of the edges depending on self.reverse (indicate from which solumn to which column they point)
+        self.init_edge_direction()
+            
+        # for efficiency we first sort the edges and select only a substet of them
+        self.select_subset_edges(time) # select only a valid subset of edges
+        
+        # select only the edges which start from our node
+        edges = self.edges[(self.edges[self.from_node] == node_name)]
+        
+        # ------------------- Initialize transport edges --------------------
         # here we are applying the aforementioned hypothesis i)
+        transp_edges = edges.loc[self.transport_ids]
         
         # extract the time
         day, time = time.days, time - pd.Timedelta(str(time.days) + " days")
         
         # to make it more efficient (but could lose some paths) you can remove "trip_id" from the groupby
         
-        # select the ids of the edges
-        if self.reverse:
-            time_col = "arr_time"
-            name_col = "arr_node"
-            
-            ids = (self.edges[(self.edges[name_col] == node_name) & (self.edges[time_col] <= time)]
-                .groupby(["dep_node", "arr_node", "trip_id"])[time_col]
-                .idxmax().values)
-        else:
-            time_col = "dep_time"
-            name_col = "dep_node"
-            ids = (self.edges[(self.edges[name_col] == node_name) & (self.edges[time_col] >= time)]
-                .groupby(["dep_node", "arr_node", "trip_id"])[time_col]
-                .idxmin().values)
-                    
-        # visit the selected edges with probability 1
-        self.edges.loc[ids, ["prob", "label"]] = [1, Status.Visited]
+        # select the ids of the edges (note: the edges are sorted!)
+        transp_ids = (
+            transp_edges
+               .drop_duplicates(["dep_node", "arr_node", "trip_id"], keep='first') # keep first => keep best
+               .index)
         
-#         self.prune_edges(node_name)
-        return ids
+        # visit the selected edges with probability 1
+        self.edges.loc[transp_ids, ["prob", "label"]] = [1, Status.Visited]
+        
+        # -------------------Initialize walk edges --------------------------
+        day = pd.Timedelta("1 day")
+        
+        walk_edges = edges.loc[self.walk_ids]
+        # visit the selected edges with probability 1 and also update the arrival time
+        self.edges.loc[walk_edges.index, ["prob", "label", self.to_day]] = [1, Status.Visited, day]
+        self.edges.loc[walk_edges.index, self.to_time] = (time - walk_edges.walking_time) if self.reverse else (time + walk_edges.walking_time)
+        self.edges.loc[walk_edges.index, self.to_day] += self.edges.loc[walk_edges.index, self.to_time]
+        # keep the indices sorted
+#         ids.sort() # TODO remove?
+        
+        return np.append(transp_ids.values, walk_edges.index.values)
         
     def expand_edge(self, edge_id, treshold):
         """ 
@@ -198,13 +236,14 @@ class Planner():
         """ Given a list of ids corresponding to all the Visited edges (for efficiency) returns the id of the best edge (the one we have to expand)."""        
         
         candidates = self.all_edges.loc[ids]
+
         # the best node (the one to be expanded) is:
         if self.reverse:
             # the one with the highest departure time
-            day = candidates.dep_day.min()
+            day = candidates.dep_day.max()
             return int(candidates.loc[candidates.dep_day == day, "dep_time"].idxmax())
         else:
-            # the one with the lowest arrival time (relative to the lowest day)
+            # the one with the lowest arrival time (relative to the lowest day)       
             day = candidates.arr_day.min()
             return int(candidates.loc[candidates.arr_day == day, "arr_time"].idxmin())
     
@@ -216,20 +255,7 @@ class Planner():
             return self.all_edges.loc[best_edge_id, "arr_node"] == target_node
         
     def visit_walking_edges(self, curr_node):
-        """ Given the current node search for close nodes reachable by foot, i.e. for walking edges. """
-        if self.reverse:
-            from_node_col = "arr_node"  
-            to_node_col = "dep_node"
-            
-            to_time_col = "dep_time"
-            to_day_col = "dep_time"
-        else:
-            from_node_col = "dep_node"  
-            to_node_col = "arr_node"
-            
-            to_time_col = "arr_time"
-            to_day_col = "arr_day"
-        
+        """ Given the current node search for close nodes reachable by foot, i.e. for walking edges. """        
         valid_walking_edges = self.walking_edges[
             (self.walking_edges.label == Status.Unvisited) &
             (self.walking_edges[from_node_col] == curr_node[to_node_col])
@@ -307,31 +333,48 @@ class Planner():
         diff_day = ((curr_edge.arr_day == next_edge.dep_day-1) & (curr_edge.arr_time > next_edge.dep_time))
         return same_day | diff_day
     
-    def initialize_edges(self, time):
-        """ This is called at the very start of the algrithm. Given the time (which may refer to teh departure or arrival time depending on self.reverse), filters the edges to keep only the ones within 24h. """
-        # TODO tread sundays - mondays
+    def sort_edges(self):
+        """ Sort the (filtered) edges by day and by time and depending on the value of self.reverse => best edges first. """            
+        self.edges.sort_values([self.to_day, self.to_time], inplace=True, ascending=not self.reverse)
+        self.edges.reset_index(drop=True, inplace=True)
         
-        # ----- initialize the walking edges just by copying them ------
-        self.walking_edges = self.walking_edges_backup
-        self.walking_edges.dep_time = -self.walking_edges.arr_time
+        # extract the indices of the transport and walk edges for faster accessing
+        self.transport_ids = self.edges.trip_id != "0000"
+        self.walk_ids = ~self.transport_ids
         
-        # ----- initialize the other edges by filtering them with the time ------
-        # extract the day and time
+        
+    def select_subset_edges(self, time):
+        """ This is called at the very start of the algrithm. Given the time (which may refer to the departure or arrival time depending on self.reverse), filters the edges to keep only the ones within 24h. It then sort the edges and reset the index so that the lower the index the best the edge (e.g. the lower the arrival time when self.reverse=False): However, the walking edge are not sorted as they do not have any arrival/departure time."""
+        
+        # extract the day and time (of the query)
         day, time = time.days, time - pd.Timedelta(str(time.days) + " days")
         
-        e = self.nowalking_edges_backup
+        e = self.all_edges
         if self.reverse:
-            # same day
-            idx = ((e.dep_day == day) & (e.dep_time < time))            
-            # and previous day 
-            idx = idx | ((e.dep_day == day-1) & (e.dep_time > time))
-        else:         
-            # same day
-            idx = ((e.arr_day == day) & (time < e.arr_time))
-            # and next day
-            idx = idx | ((e.arr_day == day+1) & (time > e.arr_time))
+            next_day = day-1
             
-        self.edges = self.nowalking_edges_backup[idx]
+            # same day
+            idx = ((e[self.from_day] == day) & (e[self.from_time] < time))  # lower bound  
+            # and previous day 
+            idx = idx | ((e[self.from_day] == np.mod(next_day,7)) & 
+                         (e[self.to_day] == np.mod(next_day,7)) &
+                         (e[self.to_time] > time)) # upper bound
+        else:       
+            next_day = day+1
+            
+            # same day
+            idx = ((e[self.from_day] == day) & (time < e[self.from_time])) # lower bound
+            # and next day
+            idx = idx | ((e[self.from_day] == np.mod(next_day,7)) & 
+                         (e[self.to_day] == np.mod(next_day,7)) &
+                         (time > e[self.to_time])) # upper bound
+                    
+        self.edges = self.all_edges.loc[idx | (self.all_edges.trip_id=="0000")].copy() # select all the walk edges too
+            
+        self.edges.loc[self.edges[self.from_day] == np.mod(next_day,7), self.from_day] = next_day
+        self.edges.loc[self.edges[self.to_day]   == np.mod(next_day,7), self.to_day] = next_day
+        
+        self.sort_edges() # sort the edges every time (if self.reverse got changed => change order of the edges too)
         
 #   prune  def prune_edges(self, curr_node):
 #         """ Given the current edges discard from self.edges all the unseen ones that depart or arrive to the current node. """
