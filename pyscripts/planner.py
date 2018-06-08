@@ -25,26 +25,27 @@ class Planner():
     """ Class used to compute the journey plan. """
     prob_one = 0.99 # approximation of probability 1, used to prune the choices
     
-    def __init__(self, edges, reverse=False):
+    def __init__(self, edges, pairwise_distances=None, reverse=False):
         """ 
         Input:
         - edges: DataFrame indicating all the edges (edges) between nodes.
+        - pairwise_distances: matrix with the pairwise distance of the nodes. If given it will help pruning the paths.
         - reverse: boolean indicating wether the graph has to be explored in a direct of reversed mode, i.e. if the exploration starts from the departure node (False) or from the arrival node (True).
         """
         self.all_edges = edges # they will be filtered every time the algorithm starts
+        
+        self.pairwise_distances = pairwise_distances
         
         self.reverse = reverse
         
         self.init_edge_direction()
     
-#     def clear(self):
-#         """ Clear the structure so to restart the computation of the best path. """
-#         self.nowalking_edges_backup.prob = np.NaN
-#         self.nowalking_edges_backup.label = Status.Unvisited
-#         self.nowalking_edges_backup.prev_edge = np.NaN
-    
     def compute_isocrone(self, start_node, start_time, max_time, treshold):
         """ Given the start node and time, a maximum time and a maximum probability (treshold), compute all the reachable stations. Return the list of the reached edge ids."""
+        
+        if start_node not in self.all_edges.dep_node.values:
+            print("Invalid node node")
+            return None
         
         max_day, max_time = max_time.days, max_time - pd.Timedelta(days=max_time.days)
         
@@ -57,18 +58,21 @@ class Planner():
                 best_day, best_time = self.edges.loc[best_edge_id, ["arr_day", "arr_time"]]
                 return best_day>max_day or best_time>max_time
             
-        #         dist = self.pairwise_distances[arrival_node] # get all distances wrt the arrival node
-        def nice_direction(from_node, to_node):
-            """ Given two node returns True is the second node is closer to the destination. """
-            return True
-#             edge = self.edges.loc[edge_id] # extract edge info
-            return dist[to_node] > dist[from_node]
+        if self.pairwise_distances is not None: 
+            dist = self.pairwise_distances[start_node] # get all distances wrt the arrival node
+            def nice_direction(from_node, to_node):
+                """ Given two node returns True is the second node is closer to the destination. """
+                return dist[to_node] > dist[from_node]
+        else:
+            nice_direction = lambda x, y: True
         
         # ------------ Run the search -------------
         # explore the graph until the time of best edge is higher (or lower, depending on self.reverse) than max_time
         last_edge_id = self.run_search(start_node, start_time, treshold, done, nice_direction)
+        if last_edge_id is None:
+            return None
         
-        # ------------- Extract teh reached stations and teh relative time --------------
+        # ------------- Extract the reached stations and teh relative time --------------
         # 1. get reached edges id
         reached_edges = self.edges.loc[self.edges.label==Status.Expanded].index
         # 2. get the first time you reached each station
@@ -85,7 +89,14 @@ class Planner():
         
     def compute_plan(self, departure_node, arrival_node, time, treshold):
         """ Given the names of the departure and arrival nodes (e.g. I want to go from 'Zürich HB' to 'Stettbach'), a treshold (in [0, 1]) and the time (which may refer either to the departure or arrival time depending on self.reverse), the bets path (which take the lowest time) whose probability is above the give treshold. """
-                        
+
+        if departure_node not in self.all_edges.dep_node.values:
+            print("Invalid departure node")
+            return None
+        if arrival_node not in self.all_edges.arr_node.values:
+            print("Invalid arrival node")
+            return None
+        
         # the nodes from which to start and end the algorithm depend on whether we have to perform the direct or reverse search
         if self.reverse:
             start_node = arrival_node 
@@ -101,15 +112,18 @@ class Planner():
             else:
                 return self.edges.loc[best_edge_id, "arr_node"] == target_node
         
-#         dist = self.pairwise_distances[arrival_node] # get all distances wrt the arrival node
-        def nice_direction(from_node, to_node):
-            """ Given two node returns True is the second node is closer to the destination. """
-            return True
-#             edge = self.edges.loc[edge_id] # extract edge info
-            return dist[to_node] < dist[from_node]
+        if self.pairwise_distances is not None: 
+            dist = self.pairwise_distances[arrival_node] # get all distances wrt the arrival node
+            def nice_direction(from_node, to_node):
+                """ Given two node returns True is the second node is closer to the destination. """
+                return dist[to_node] < dist[from_node]
+        else:
+            nice_direction = lambda x, y: True
         
         # ------------ Run the search until you arrive to the target node -------------
         last_edge_id = self.run_search(start_node, time, treshold, done, nice_direction)
+        if last_edge_id is None:
+            return None
         
         # ------------ Collect the edge ids of the found path and return them -------------
         node_col = "arr_node" if self.reverse else "dep_node"
@@ -122,7 +136,18 @@ class Planner():
             
         if not self.reverse:
             path.reverse()
-            
+        else:
+            for i in range(1, len(path)):
+                edge = self.edges.loc[path[i]]
+                if edge.trip_id == "0000":
+                    # for each walk edge we have to set the start of walking just after the arrival of the edge before
+                    walking_time = edge.walking_time
+                    prev_day, prev_time = self.edges.loc[path[i-1], ["arr_day", "arr_time"]]
+                
+                    arr_time = prev_time + walking_time
+                    arr_day = prev_day + arr_time.days
+                    arr_time = arr_time - pd.Timedelta(days=arr_time.days)
+                    self.edges.loc[path[i], ["dep_day", "dep_time", "arr_day", "arr_time"]] = [prev_day, prev_time, arr_day, arr_time]
         return path
     
     def run_search(self, start_node, start_time, treshold, done, nice_direction=lambda from_node, to_node: True):
@@ -138,7 +163,7 @@ class Planner():
         while True:
             if len(transp_ids) == 0 and len(walk_ids) == 0:
                 print("There is no path with a probability higher than the given treshold.")
-                return []
+                return None
             
             # pop node to be expanded
             edge_id = self.pop_best_edge(transp_ids, walk_ids)
@@ -257,7 +282,7 @@ class Planner():
         # ------------- first visit the walking edges ---------
         # expand only if the current one is not already a walk edge
         ids_walk = []
-        if curr_edge.trip_id != "0000":
+        if True:#curr_edge.trip_id != "0000":
             walk_edges = self.edges.loc[self.walk_ids]
             walk_edges = walk_edges[
                 (walk_edges[self.from_node] == curr_edge[self.to_node]) & 
@@ -284,6 +309,7 @@ class Planner():
             # check if we are moving for the second time in the wrong direction
             is_nice = nice_direction(curr_node, next_node)
             if (not is_nice) and curr_edge_not_nice:
+#                 print("skip!")
                 continue
                 
             # for each edge that bring me to the same next node
@@ -314,10 +340,13 @@ class Planner():
     def pop_best_edge(self, transp_ids, walk_ids):
         """ Given a list of ids corresponding to all the Visited edges (for efficiency) returns the id of the best edge (the one we have to expand)."""        
         
-        best_transp_id = min(transp_ids) # we sorted them, the lower the better
-        
-        # take walk edges and the best transport edge
-        candidates = self.edges.loc[np.append(walk_ids, best_transp_id)] 
+        if len(transp_ids) > 0:
+            best_transp_id = min(transp_ids) # we sorted them, the lower the better
+
+            # take walk edges and the best transport edge
+            candidates = self.edges.loc[np.append(walk_ids, best_transp_id)] 
+        else:
+            candidates = self.edges.loc[walk_ids] 
         if self.reverse:
             # the one with the highest departure time
             day = candidates.dep_day.max()
@@ -347,13 +376,14 @@ class Planner():
             return [new_day, new_time, x.walking_time]
         
         # set the common parameters
-        self.edges.loc[walk_edge_ids, [self.from_day, self.from_time, "label", "prob", "prev_edge", "distribution"]] = [
+        self.edges.loc[walk_edge_ids, [self.from_day, self.from_time, "label", "prob", "prev_edge", "distribution", "nice_direction"]] = [
             curr_edge[self.to_day],
             curr_edge[self.to_time],
             Status.Visited, 
             curr_edge.prob,
             curr_edge.name,
-            curr_edge.distribution
+            curr_edge.distribution,
+            curr_edge.nice_direction
         ]        
         
         # compute the times
