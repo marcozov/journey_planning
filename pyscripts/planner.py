@@ -113,7 +113,7 @@ class Planner():
                 return self.edges.loc[best_edge_id, "arr_node"] == target_node
         
         if self.pairwise_distances is not None: 
-            dist = self.pairwise_distances[arrival_node] # get all distances wrt the arrival node
+            dist = self.pairwise_distances[target_node] # get all distances wrt the arrival node
             def nice_direction(from_node, to_node):
                 """ Given two node returns True is the second node is closer to the destination. """
                 return dist[to_node] < dist[from_node]
@@ -159,6 +159,12 @@ class Planner():
         # visit the edges from the starting node
         transp_ids, walk_ids = self.init_edges(start_node, start_time, nice_direction)
 
+        
+        # Initialize a "lookup" table to check if I already took a path id during a certain search
+        all_trips = self.edges.path_id.unique()
+        self.visited_paths = pd.Series(index=all_trips, data=False)
+        self.visited_paths[self.edges.loc[transp_ids, "path_id"]] = True
+        
         # ------------ Main iteration -------------
         while True:
             if len(transp_ids) == 0 and len(walk_ids) == 0:
@@ -305,17 +311,31 @@ class Planner():
         curr_edge_not_nice = not curr_edge["nice_direction"]
         next_nodes_edges = self.gen_cadidate_transports(curr_edge) # generate a DataFrame of edges for each possible next node
         for next_node, edges_to_next_node in next_nodes_edges: 
+            is_nice=True
             
             # check if we are moving for the second time in the wrong direction
             is_nice = nice_direction(curr_node, next_node)
             if (not is_nice) and curr_edge_not_nice:
-#                 print("skip!")
+#                 print("skip, not nice!")
                 continue
                 
             # for each edge that bring me to the same next node
             for path_id, next_path in edges_to_next_node.groupby("path_id"):
+                
+                check_trip_id = False
+                if curr_edge.path_id == path_id:
+                    check_trip_id = True # same path => better stay on the same trip id (same transport)
+                    
+                if curr_edge.path_id != path_id and self.visited_paths[path_id]: 
+                    # if I already took a transport which does this path, avoid taking one which does the same 
+#                     print("skip path_id")
+                    continue
                 # for each edge that shares the same path
-                for idx, next_edge in next_path.iterrows():         
+                for idx, next_edge in next_path.iterrows():
+                    if check_trip_id and curr_edge.trip_id != next_edge.trip_id:
+                        print("skip trip_id")
+                        continue
+                    
                     # take the edges on this path until the probability gets high enough (usually just 1 or 2)
                     prob_edge = self.prob_connection(curr_edge, next_edge)  # prob to take that edge
                     prob_path = curr_edge.prob*prob_edge # prob to take the whole path AND that edge 
@@ -335,6 +355,8 @@ class Planner():
         # finally prune the transport edges if the probability of the current edge was ~1
         if curr_edge.prob >= Planner.prob_one:
             self.prune_edges(curr_edge)
+            visited_transp = self.edges.loc[ids_transp]
+            self.visited_paths[visited_transp.loc[visited_transp.prob >= Planner.prob_one, "path_id"]] = True 
         return ids_transp, ids_walk
     
     def pop_best_edge(self, transp_ids, walk_ids):
@@ -497,7 +519,6 @@ class Planner():
         # - unvisited edges
         # - which start from the where current edge arrived
         # - does not bring you back to the previous node (this because you did not took an edge in that direction => a later path may need to travel that way )
-        # - with same path_id as already visited transport edges (?)
         self.edges = self.edges[~(
             (self.edges.label == Status.Unvisited) &
             (self.edges[self.from_node] == curr_edge[self.to_node]) & 
