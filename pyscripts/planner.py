@@ -6,7 +6,6 @@ from scipy.stats import gamma
 import pandas as pd
 import numpy as np
 
-# TODO change "0000" to "walk"
 class Status():
     """ 
     Enum specifying the status of an edge:
@@ -34,14 +33,9 @@ class Planner():
         """
         self.all_edges = edges # they will be filtered every time the algorithm starts
         
-#         self.nowalking_edges_backup = edges[edges.trip_id != "0000"] # they will be filtered every time the algorithm starts
-#         self.edges = self.nowalking_edges_backup
-#         self.walking_edges_backup = edges[edges.trip_id == "0000"] # keep separately the walking edges
-        
         self.reverse = reverse
         
         self.init_edge_direction()
-#         self.sort_edges()
     
 #     def clear(self):
 #         """ Clear the structure so to restart the computation of the best path. """
@@ -49,15 +43,49 @@ class Planner():
 #         self.nowalking_edges_backup.label = Status.Unvisited
 #         self.nowalking_edges_backup.prev_edge = np.NaN
     
+    def compute_isocrone(self, start_node, start_time, max_time, treshold):
+        """ Given the start node and time, a maximum time and a maximum probability (treshold), compute all the reachable stations. Return the list of the reached edge ids."""
+        
+        max_day, max_time = max_time.days, max_time - pd.Timedelta(days=max_time.days)
+        
+        def done(best_edge_id):
+            """ Given the id of the best edge check if we still are within the time. """
+            if self.reverse:
+                best_day, best_time = self.edges.loc[best_edge_id, ["dep_day", "dep_time"]]
+                return best_day<max_day or best_time<max_time
+            else:
+                best_day, best_time = self.edges.loc[best_edge_id, ["arr_day", "arr_time"]]
+                return best_day>max_day or best_time>max_time
+            
+        #         dist = self.pairwise_distances[arrival_node] # get all distances wrt the arrival node
+        def nice_direction(from_node, to_node):
+            """ Given two node returns True is the second node is closer to the destination. """
+            return True
+#             edge = self.edges.loc[edge_id] # extract edge info
+            return dist[to_node] > dist[from_node]
+        
+        # ------------ Run the search -------------
+        # explore the graph until the time of best edge is higher (or lower, depending on self.reverse) than max_time
+        last_edge_id = self.run_search(start_node, start_time, treshold, done, nice_direction)
+        
+        # ------------- Extract teh reached stations and teh relative time --------------
+        # 1. get reached edges id
+        reached_edges = self.edges.loc[self.edges.label==Status.Expanded].index
+        # 2. get the first time you reached each station
+        reached_nodes = self.edges.loc[reached_edges, [self.to_node, self.to_day, self.to_time]]
+        reached_nodes = reached_nodes[reached_nodes[self.to_node] != start_node]  # drop the starting node
+        reached = (reached_nodes
+                   .sort_values([self.to_day, self.to_time])
+                   .groupby(self.to_node)
+                   .first()
+        ) # sort and get the first time you reached a certain station
+        # put the starting node with its starting time
+        reached.loc[start_node, [self.to_day, self.to_time]] = [start_time.days, start_time - pd.Timedelta(days=start_time.days)]
+        return reached.sort_values([self.to_day, self.to_time])
+        
     def compute_plan(self, departure_node, arrival_node, time, treshold):
         """ Given the names of the departure and arrival nodes (e.g. I want to go from 'Zürich HB' to 'Stettbach'), a treshold (in [0, 1]) and the time (which may refer either to the departure or arrival time depending on self.reverse), the bets path (which take the lowest time) whose probability is above the give treshold. """
-        
-        # TODO could "arrival_node" be a time? so to indicate WHEN to stop instead of WHERE
-        
-        assert treshold>=0 and treshold<=1, "treshold should be in [0, 1]"
-        
-#         self.clear()
-                
+                        
         # the nodes from which to start and end the algorithm depend on whether we have to perform the direct or reverse search
         if self.reverse:
             start_node = arrival_node 
@@ -65,38 +93,23 @@ class Planner():
         else:
             start_node = departure_node 
             target_node = arrival_node
-            
-        # list of Visited edges
-        visited_ids = []
-
-        # ------------ Initialization ------------ 
-        # visit the edges from the starting node
-#         visited_ids = self.init_edges(start_node, time)
-        transp_ids, walk_ids = self.init_edges(start_node, time)
-
-        # ------------ Main iteration -------------
-        while True:
-#             print(len(visited_ids))
-#             print(self.edges.shape)
-#             print(self.walking_edges.shape)
-            if len(transp_ids) == 0 and len(walk_ids) == 0:
-                print("There is no path with a probability higher than the given treshold.")
-                return []
-            
-            # pop node to be expanded
-            edge_id = self.pop_best_edge(transp_ids, walk_ids)
         
-            # check termination: we reached the target node and with a edge which is the best one
-            if self.done(edge_id, target_node):
-                break
-
-            # expand the best edge and update the list of viewed edges
-            transp_ids_new, walk_ids_new = self.expand_edge(edge_id, treshold=treshold) # expand with the given treshold
-            # update the lists of visited edges
-            transp_ids += transp_ids_new
-            walk_ids += walk_ids_new
+        def done(best_edge_id):
+            """ Given the id of the best edge check if we reached it. """
+            if self.reverse:
+                return self.edges.loc[best_edge_id, "dep_node"] == target_node
+            else:
+                return self.edges.loc[best_edge_id, "arr_node"] == target_node
         
-        last_edge_id = edge_id # identifies the very last mean we took
+#         dist = self.pairwise_distances[arrival_node] # get all distances wrt the arrival node
+        def nice_direction(from_node, to_node):
+            """ Given two node returns True is the second node is closer to the destination. """
+            return True
+#             edge = self.edges.loc[edge_id] # extract edge info
+            return dist[to_node] < dist[from_node]
+        
+        # ------------ Run the search until you arrive to the target node -------------
+        last_edge_id = self.run_search(start_node, time, treshold, done, nice_direction)
         
         # ------------ Collect the edge ids of the found path and return them -------------
         node_col = "arr_node" if self.reverse else "dep_node"
@@ -111,7 +124,38 @@ class Planner():
             path.reverse()
             
         return path
+    
+    def run_search(self, start_node, start_time, treshold, done, nice_direction=lambda from_node, to_node: True):
+        """ Runs the main part of the search algorithm. Given a start node and time (which may be where and when you depart or arrive depending on self.reverse) and the treshold, continue exploring the graph until the done function (which takes as input just the id of the current best edge) returns True. This method returns the id of the last edge. 
+        nice_direction is a function that is used to prune the edges: no more than one edge that goes towards the wrong direction should be on the same path. """
+        assert treshold>=0 and treshold<=1, "treshold should be in [0, 1]"
 
+        # ------------ Initialization ------------ 
+        # visit the edges from the starting node
+        transp_ids, walk_ids = self.init_edges(start_node, start_time, nice_direction)
+
+        # ------------ Main iteration -------------
+        while True:
+            if len(transp_ids) == 0 and len(walk_ids) == 0:
+                print("There is no path with a probability higher than the given treshold.")
+                return []
+            
+            # pop node to be expanded
+            edge_id = self.pop_best_edge(transp_ids, walk_ids)
+        
+            # check termination: we reached the target node and with a edge which is the best one
+            if done(edge_id):
+                break
+
+            # expand the best edge and update the list of viewed edges
+            transp_ids_new, walk_ids_new = self.expand_edge(edge_id, treshold=treshold, nice_direction=nice_direction) # expand with the given treshold
+            # update the lists of visited edges
+            transp_ids += transp_ids_new
+            walk_ids += walk_ids_new
+        
+        last_edge_id = edge_id # identifies the very last mean we took
+        return edge_id
+        
     def init_edge_direction(self):
         """ Initialize the direction of the edge. """
         
@@ -135,7 +179,7 @@ class Planner():
             self.from_day = "dep_day"
             self.to_day = "arr_day"
         
-    def init_edges(self, node_name, time):
+    def init_edges(self, node_name, time, nice_direction=lambda from_node, to_node: True):
         """ 
         Initializes the search given a starting node and time, i.e. initializes the first edges to visit.
         Fetches for all edges <node_name> -> A (where A is a reachable node) and return the ones, within the groups of edges with the same trip_id, that starts the first and set them as Visited with probability 1. Repeat for every possible A.
@@ -158,7 +202,6 @@ class Planner():
         # here we are applying the aforementioned hypothesis i)
         transp_edges = self.edges.loc[valid_edges.intersection(self.transport_ids)]
 
-        # TODO: to make it more efficient (but could lose some paths) you can remove "path_id" from the groupby
         # select the ids of the edges (note: the edges are sorted!) for EACH different path
         transp_ids = (
             transp_edges
@@ -167,7 +210,8 @@ class Planner():
         
         # visit the selected edges with probability 1
         self.edges.loc[transp_ids, ["prob", "label"]] = [1, Status.Visited]
-        
+        self.edges.loc[transp_ids, "nice_direction"] = self.edges.loc[transp_ids]\
+                                                            .apply(lambda x: nice_direction(*x[[self.from_node, self.to_node]]), axis=1)        
         # -------------------Initialize walk edges --------------------------
         # extract the time
         day, time = time.days, time - pd.Timedelta(days=time.days)
@@ -184,7 +228,7 @@ class Planner():
         walk_edges_ids = valid_edges.intersection(self.walk_ids)
         walk_edges = self.edges.loc[walk_edges_ids]
         # visit the selected edges with probability 1 and also update the arrival time
-        self.edges.loc[walk_edges_ids, ["prob", "label", self.from_day, self.from_time]] = [1, Status.Visited, day, time]
+        self.edges.loc[walk_edges_ids, ["prob", "label", self.from_day, self.from_time, "nice_direction"]] = [1, Status.Visited, day, time, True]
         self.edges.loc[walk_edges_ids, [self.to_day, self.to_time]] = walk_edges[[self.to_day, self.to_time, "walking_time"]].apply(sum_time, axis=1)[[self.to_day, self.to_time]]
         
         # prune: remove all the other edges with the same path_id that pass by this starting node
@@ -196,9 +240,8 @@ class Planner():
         ]
         
         return transp_ids.tolist(), walk_edges_ids.tolist()
-#         return np.append(transp_ids.values, walk_edges.index.values) # TODO: keep separated (for efficiency)
         
-    def expand_edge(self, edge_id, treshold):
+    def expand_edge(self, edge_id, treshold, nice_direction=lambda from_node, to_node: True):
         """ 
         Given a edge id, expand all the edges starting from the reached node whose probability is higher than the given treshold. 
         To prune we consider only the edges from B to A in ascending order of time and stop when there is at least a edge whose probability of taking it is >= Planner.prob_one.
@@ -212,28 +255,39 @@ class Planner():
         curr_edge = self.edges.loc[edge_id]
             
         # ------------- first visit the walking edges ---------
-        walk_edges = self.edges.loc[self.walk_ids]
-        walk_edges = walk_edges[
-            (walk_edges[self.from_node] == curr_edge[self.to_node]) & 
-            (walk_edges[self.to_node] != curr_edge[self.from_node])
-        ]
-
+        # expand only if the current one is not already a walk edge
         ids_walk = []
-        for idx, walk_edge in walk_edges.iterrows():
-            # for each walking edge you can take, take it only if you never took it or 
-            # if you have now a higher probability
-            if pd.isnull(walk_edge.prob) or walk_edge.prob < curr_edge.prob:
-                ids_walk.append(idx)
-        self.visit_walk_edges(curr_edge, ids_walk)
+        if curr_edge.trip_id != "0000":
+            walk_edges = self.edges.loc[self.walk_ids]
+            walk_edges = walk_edges[
+                (walk_edges[self.from_node] == curr_edge[self.to_node]) & 
+                (walk_edges[self.to_node] != curr_edge[self.from_node])
+            ]
+
+            ids_walk = []
+            for idx, walk_edge in walk_edges.iterrows():
+                # for each walking edge you can take, take it only if you never took it or 
+                # if you have now a higher probability
+                if pd.isnull(walk_edge.prob) or walk_edge.prob < curr_edge.prob:
+                    ids_walk.append(idx)
+            self.visit_walk_edges(curr_edge, ids_walk)
 
         # ------------- then the other edges --------------
         ids_transp = [] # keep a list of visited nodes
         # for each next possible node scan all the possible edges until the probability of 
         # taking the edge is above Planner.prob_one
-        next_nodes = self.gen_cadidate_transports(curr_edge) # generate a DataFrame of edges for each possible next node
-        for next_node in next_nodes: 
+        curr_node = curr_edge[self.to_node]
+        curr_edge_not_nice = not curr_edge["nice_direction"]
+        next_nodes_edges = self.gen_cadidate_transports(curr_edge) # generate a DataFrame of edges for each possible next node
+        for next_node, edges_to_next_node in next_nodes_edges: 
+            
+            # check if we are moving for the second time in the wrong direction
+            is_nice = nice_direction(curr_node, next_node)
+            if (not is_nice) and curr_edge_not_nice:
+                continue
+                
             # for each edge that bring me to the same next node
-            for path_id, next_path in next_node.groupby("path_id"):
+            for path_id, next_path in edges_to_next_node.groupby("path_id"):
                 # for each edge that shares the same path
                 for idx, next_edge in next_path.iterrows():         
                     # take the edges on this path until the probability gets high enough (usually just 1 or 2)
@@ -245,16 +299,16 @@ class Planner():
                         # otherwise we also check if we can improve the probability (if so then we re-take this edge)
                         if next_edge.label == Status.Unvisited or (next_edge.label != Status.Unvisited and prob_path > next_edge.prob):
                             ids_transp.append(idx)
-                            self.edges.loc[idx, ["label", "prob", "prev_edge"]] = [Status.Visited, prob_path, curr_edge.name]
+                            self.edges.loc[idx, ["label", "prob", "prev_edge", "nice_direction"]] = [Status.Visited, prob_path, curr_edge.name, is_nice]
 
                     if prob_edge > Planner.prob_one:
                         # we found at least one edge to the node whose probability is high enough
                         break
-
+        
 #         print(self.edges.shape)
         # finally prune the transport edges if the probability of the current edge was ~1
         if curr_edge.prob >= Planner.prob_one:
-            self.prune_edges(curr_edge, ids_transp)
+            self.prune_edges(curr_edge)
         return ids_transp, ids_walk
     
     def pop_best_edge(self, transp_ids, walk_ids):
@@ -278,14 +332,7 @@ class Planner():
         else:
             transp_ids.remove(best_id)
         return best_id
-    
-    def done(self, best_edge_id, target_node):
-        """ Given the id of the best edge and the name of the target node check if we reached it. """
-        if self.reverse:
-            return self.edges.loc[best_edge_id, "dep_node"] == target_node
-        else:
-            return self.edges.loc[best_edge_id, "arr_node"] == target_node
-        
+
     def visit_walk_edges(self, curr_edge, walk_edge_ids):
         """ Initializes the walk edges correponding to the given indices as visited. """
         
@@ -359,7 +406,7 @@ class Planner():
         
         # for each next node yied the dataframe of edges that bring there
         for next_node, next_node_edges in candidates.groupby(to_node_col):
-            yield next_node_edges
+            yield next_node, next_node_edges
     
     def time_constraint(self, curr_edge, next_edges):
         """ Given the current edge return a list of edge ids of possible candidates such that the connection time is not longer than 24h. """
@@ -413,19 +460,17 @@ class Planner():
         
         self.sort_edges() # sort the edges every time (if self.reverse got changed => change order of the edges too)
         
-    def prune_edges(self, curr_edge, ids_transp):
+    def prune_edges(self, curr_edge):
         """ Drop all the outgoung unvisited edges with the same path id as the passed transport edges: it does not make sense to keep a next means of transport when you already took a previous one with high probability. """
-        path_ids_to_drop = self.edges.loc[ids_transp, "path_id"].unique()
         
         # criteria:
         # - unvisited edges
-        # - which start from the wher current edge arrived
+        # - which start from the where current edge arrived
         # - does not bring you back to the previous node (this because you did not took an edge in that direction => a later path may need to travel that way )
         # - with same path_id as already visited transport edges (?)
         self.edges = self.edges[~(
             (self.edges.label == Status.Unvisited) &
             (self.edges[self.from_node] == curr_edge[self.to_node]) & 
             (self.edges[self.to_node] != curr_edge[self.from_node])
-#             self.edges.path_id.isin(path_ids_to_drop)
         )
         ]
