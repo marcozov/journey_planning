@@ -21,7 +21,7 @@ def compute_distance(lat1, lon1, lat2, lon2):
     return distance*1000
 
 def generate_metadata_pandas(spark):
-    metadata = spark.read.text('/datasets/project/metadata/BFKOORD_GEO')
+    metadata = spark.read.text('data/metadata/BFKOORD_GEO')
 
     # Splitting and adding new columns to the spark dataframe
     split_col = pyspark.sql.functions.split(metadata['value'], " % ")
